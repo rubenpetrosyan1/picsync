@@ -1,0 +1,207 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+picsync
+picsync.exe
+picsync-pro
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+node_modules/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Application data directory
+/data/
+/data/*
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+/logs/
+*.log.*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Build artifacts
+/dist/
+/build/
+/out/
+/bin/
+
+# Coverage reports
+coverage.html
+coverage.out
+*.coverprofile
+
+# Debug files
+debug
+*.debug
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# User-specific files
+*.user
+*.userosscache
+*.sln.docstates
+
+# Go module files
+go.sum
+go.mod
+!go.mod
+!go.sum
+
+# SSL certificates
+*.pem
+*.crt
+*.key
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker files
+*.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# CI/CD
+.gitlab-ci.yml
+.github/
+*.ci.yaml
+*.ci.yml
+
+# Local development
+local/
+*.local
+
+# Secret files
+*secret*
+*key*
+*password*
+*.p12
+*.pfx
+
+# Node.js
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+target/
+.idea/
+
+# C/C++
+*.o
+*.obj
+*.a
+*.lib
+*.so.*
+*.dylib
+*.dll
+
+# Rust
+target/
+*.rs.bk
+
+# Ruby
+*.gem
+*.rbc
+/.config
+coverage/
+InstalledFiles
+pkg/
+spec/reports/
+test/tmp/
+test/version_tmp/
+tmp/
+
+# Web
+*.css.map
+*.js.map
+*.min.js
+*.min.css
+
+# Compiled output
+/dist
+/build
+/out
+
+# NPM
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
