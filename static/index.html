@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PicSync Pro</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+</head>
+<body>
+    <div id="login-screen" class="login-container">
+        <div class="login-box">
+            <h1 data-i18n="login.title">🚀 PicSync Pro</h1>
+            <input type="text" id="username" data-i18n-placeholder="login.username" placeholder="Username" autocomplete="off">
+            <input type="password" id="password" data-i18n-placeholder="login.password" placeholder="Password">
+            <button onclick="login()" data-i18n="login.button">Login</button>
+            <div class="fingerprint-info" data-i18n="app.default_creds">💡 Default: admin / admin123</div>
+        </div>
+    </div>
+
+    <div id="app" style="display: none;">
+        <div class="toolbar">
+            <h2 data-i18n="app.title">📁 PicSync Pro Manager</h2>
+            <div class="toolbar-buttons">
+                <select id="language-select" class="language-select" onchange="changeLanguage(this.value)">
+                    <option value="en">English</option>
+                    <option value="fr">Français</option>
+                    <option value="de">Deutsch</option>
+                    <option value="ru">Русский</option>
+                    <option value="zh">中文</option>
+                    <option value="hy">Հայերեն</option>
+                </select>
+                <button onclick="showSettings()" class="user-icon-btn" title="Settings">👤</button>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="showTab('map', this)" data-i18n="tab.map">🗺️ Photo Map</button>
+            <button class="tab-btn" onclick="showTab('sync', this)" data-i18n="tab.sync">🔄 Sync Jobs</button>
+            <button class="tab-btn" onclick="showTab('search', this)" data-i18n="tab.search">🔍 Search & Duplicates</button>
+            <button class="tab-btn" onclick="showTab('sort', this)" data-i18n="tab.sort">📊 Files Sorting</button>
+        </div>
+
+        <!-- Photo Map Tab (first/default) -->
+        <div id="map-tab" class="tab-content active map-tab-content">
+            <div class="map-controls-bar">
+                <div class="map-path-input-wrapper">
+                    <input type="text" id="map-source-path" data-i18n-placeholder="map.path_placeholder" placeholder="Folder path, e.g. /Users/..." autocomplete="off">
+                    <div id="map-path-suggestions" class="path-suggestions" style="display: none;"></div>
+                </div>
+                <button onclick="loadPhotosOnMap()" class="load-map-btn" data-i18n="map.load">🗺️ Load</button>
+                <button onclick="openFolderBrowser('map', 'map-source-path')" class="browse-btn">📁</button>
+            </div>
+            <div class="map-stats" id="map-stats">
+                <span>📸 <strong id="photo-count">0</strong></span>
+                <span>📍 <strong id="gps-count">0</strong></span>
+                <span>🌍 <strong id="location-count">0</strong></span>
+            </div>
+            <div id="map" style="height: calc(100vh - 270px); width: 100%; border-radius: 0; border: none;"></div>
+            <div class="timeline-container" id="timeline-container">
+                <div class="timeline-header">
+                    <span class="timeline-label" data-i18n="timeline.title">📅 Timeline</span>
+                    <div class="timeline-actions">
+                        <button onclick="importTimeline()" class="timeline-import-btn" data-i18n="timeline.import">📥 Import Timeline</button>
+                        <button onclick="exportTimeline('kml')" class="timeline-export-btn" id="timeline-export-kml-btn" style="display: none;" data-i18n="timeline.export_kml">📤 Export KML</button>
+                        <button onclick="exportTimeline('json')" class="timeline-export-btn" id="timeline-export-json-btn" style="display: none;" data-i18n="timeline.export_json">📤 Export JSON</button>
+                        <button onclick="clearImportedTimeline()" class="timeline-clear-btn" id="timeline-clear-btn" style="display: none;" data-i18n="timeline.clear_track">🗑️ Clear Track</button>
+                    </div>
+                </div>
+                <div class="timeline-export-instructions" id="timeline-export-instructions" style="display: none;">
+                    <h4 data-i18n="timeline.import_title">📥 How to export your Google Maps Timeline</h4>
+                    <ol>
+                        <li data-i18n="timeline.step1">Go to <strong><a href="https://takeout.google.com" target="_blank">Google Takeout</a></strong></li>
+                        <li data-i18n="timeline.step2">Click <strong>"Deselect all"</strong> then scroll down and check <strong>"Location History"</strong></li>
+                        <li data-i18n="timeline.step3">Click <strong>"Multiple formats"</strong> and choose <strong>JSON</strong> or <strong>KML</strong> (both supported)</li>
+                        <li data-i18n="timeline.step4">Click <strong>"OK"</strong> → <strong>"Next step"</strong></li>
+                        <li data-i18n="timeline.step5">Choose <strong>"Export once"</strong> → <strong>"Create export"</strong></li>
+                        <li data-i18n="timeline.step6">Wait for the email or download link, then unzip the archive</li>
+                        <li data-i18n="timeline.step7">Look for <strong>Timeline.json</strong> or <strong>Records.json</strong> (JSON format) or <strong>Timeline.kml</strong> (KML format)</li>
+                        <li data-i18n="timeline.step8">Click <strong>"Import Google Maps Timeline"</strong> above and select that file</li>
+                    </ol>
+                    <button onclick="hideExportInstructions()" class="action-btn-small" data-i18n="timeline.close">✖ Close</button>
+                </div>
+                <div class="timeline-range-row">
+                    <span id="timeline-min-label">—</span>
+                    <span id="timeline-max-label">—</span>
+                </div>
+                <div class="timeline-slider-wrapper">
+                    <div class="timeline-track"></div>
+                    <div class="timeline-density" id="timeline-density"></div>
+                    <div class="timeline-track-fill" id="timeline-fill"></div>
+                    <input type="range" class="timeline-input" id="timeline-min" min="0" max="1000" value="0">
+                    <input type="range" class="timeline-input" id="timeline-max" min="0" max="1000" value="1000">
+                </div>
+                <div class="timeline-hint" id="timeline-hint" data-i18n="timeline.hint_full">Load photos to activate timeline filtering. <a href="javascript:void(0)" onclick="showExportInstructions()" data-i18n="timeline.how_to_get">How do I get my Google Maps timeline?</a></div>
+            </div>
+        </div>
+
+        <!-- Sync Jobs Tab with integrated logs -->
+        <div id="sync-tab" class="tab-content">
+            <div class="sync-container">
+                <div class="sync-form-section">
+                    <h3 data-i18n="sync.create">➕ Create Sync Job</h3>
+                    <input type="text" id="job-name" data-i18n-placeholder="sync.job_name" placeholder="Job Name">
+                    
+                    <label data-i18n="sync.source_path">Source Path:</label>
+                    <div class="path-browser">
+                        <input type="text" id="sync-source" placeholder="Enter source path or browse" onchange="validatePath(this)">
+                        <button onclick="openFolderBrowser('source', 'sync-source')" class="browse-btn" data-i18n="sync.browse">📁 Browse</button>
+                    </div>
+                    
+                    <label data-i18n="sync.dest_path">Destination Path:</label>
+                    <div class="path-browser">
+                        <input type="text" id="sync-dest" placeholder="Enter destination path or browse" onchange="validatePath(this)">
+                        <button onclick="openFolderBrowser('dest', 'sync-dest')" class="browse-btn" data-i18n="sync.browse">📁 Browse</button>
+                    </div>
+                    
+                    <h4 data-i18n="sync.conflict_resolution">Conflict Resolution:</h4>
+                    <select id="conflict-rule">
+                        <option value="skip" data-i18n="sync.skip_existing">Skip existing files</option>
+                        <option value="overwrite" data-i18n="sync.overwrite">Overwrite existing files</option>
+                        <option value="keepNewest" data-i18n="sync.keep_newest">Keep newest file</option>
+                        <option value="keepOldest" data-i18n="sync.keep_oldest">Keep oldest file</option>
+                    </select>
+                    
+                    <h4 data-i18n="sync.file_filters">File Filters:</h4>
+                    <input type="text" id="include-patterns" data-i18n-placeholder="sync.include_patterns" placeholder="Include patterns (e.g., *.jpg,*.png)">
+                    <input type="text" id="exclude-patterns" data-i18n-placeholder="sync.exclude_patterns" placeholder="Exclude patterns (e.g., *.tmp,node_modules)">
+                    
+                    <label>
+                        <input type="checkbox" id="permanent-job"> <span data-i18n="sync.permanent">Show as Permanent Button</span>
+                    </label>
+                    <button onclick="createSyncJob()" class="create-job-btn" data-i18n="sync.create_btn">Create Job</button>
+                </div>
+                
+                <div class="jobs-section">
+                    <h3 data-i18n="sync.jobs">📋 Sync Jobs</h3>
+                    <div id="sync-jobs-list" class="sync-jobs-list"></div>
+                    
+                    <h3 style="margin-top: 20px;" data-i18n="sync.logs_history">📝 Job Logs & History</h3>
+                    <div class="logs-controls">
+                        <button onclick="refreshLogs()" class="action-btn-small" data-i18n="sync.refresh_logs">🔄 Refresh Logs</button>
+                        <button onclick="clearLogs()" class="action-btn-small danger" data-i18n="sync.clear_logs">🗑️ Clear Logs</button>
+                        <button onclick="clearHistory()" class="action-btn-small danger" data-i18n="sync.clear_history">🗑️ Clear History</button>
+                    </div>
+                    <div id="job-logs-container" class="job-logs-container">
+                        <div class="history-summary" id="history-summary"></div>
+                        <div class="logs-list" id="logs-list"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Search & Duplicates Tab (combined) -->
+        <div id="search-tab" class="tab-content">
+            <div class="combined-search-panel">
+                <div class="search-section">
+                    <h3 data-i18n="search.title">🔎 Advanced File Search</h3>
+                    <div class="search-filters">
+                        <div class="path-browser">
+                            <input type="text" id="search-path" data-i18n-placeholder="search.root_path" placeholder="Root path to search">
+                            <button onclick="openFolderBrowser('search', 'search-path')" class="browse-btn" data-i18n="sync.browse">📁 Browse</button>
+                        </div>
+                        
+                        <input type="text" id="search-name" data-i18n-placeholder="search.name_contains" placeholder="File name contains...">
+                        
+                        <div class="filter-row">
+                            <input type="number" id="min-size" data-i18n-placeholder="search.min_size" placeholder="Min size (bytes)">
+                            <input type="number" id="max-size" data-i18n-placeholder="search.max_size" placeholder="Max size (bytes)">
+                        </div>
+                        
+                        <input type="text" id="extensions" data-i18n-placeholder="search.extensions" placeholder="File extensions (e.g., .jpg,.png,.mp4)">
+                        
+                        <div class="filter-row">
+                            <input type="date" id="modified-after">
+                            <input type="date" id="modified-before">
+                        </div>
+                        
+                        <label>
+                            <input type="checkbox" id="case-sensitive"> <span data-i18n="search.case_sensitive">Case sensitive search</span>
+                        </label>
+                        
+                        <button onclick="performSearch()" class="search-btn" data-i18n="search.btn">🔍 Search</button>
+                    </div>
+                    <div id="search-results" class="search-results"></div>
+                </div>
+                
+                <div class="duplicate-section">
+                    <h3 data-i18n="duplicates.title">🔄 Duplicate Finder</h3>
+                    <div class="duplicate-scan">
+                        <div class="path-browser">
+                            <input type="text" id="scan-path" data-i18n-placeholder="duplicates.scan_path" placeholder="Path to scan for duplicates">
+                            <button onclick="openFolderBrowser('duplicate', 'scan-path')" class="browse-btn" data-i18n="sync.browse">📁 Browse</button>
+                        </div>
+                        <button onclick="scanDuplicates()" class="search-btn" data-i18n="duplicates.scan">🔍 Scan for Duplicates</button>
+                    </div>
+                    <div id="duplicates-result" class="duplicates-list"></div>
+                    <div class="duplicate-actions">
+                        <button onclick="deleteSelectedDuplicates()" class="danger" data-i18n="duplicates.delete_selected">🗑️ Delete Selected</button>
+                        <button onclick="moveSelectedDuplicates()" data-i18n="duplicates.move_selected">📂 Move Selected to...</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    <!-- Files Sorting Tab -->
+    <div id="sort-tab" class="tab-content">
+        <div class="sort-container">
+            <div class="sort-form-section">
+                <h3 data-i18n="sort.title">📊 Sort Files</h3>
+                <p class="sort-description" data-i18n="sort.description">Organize files by date or location based on metadata</p>
+                
+                <label data-i18n="sort.job_name">Sort Job Name:</label>
+                <input type="text" id="sort-job-name" data-i18n-placeholder="sort.job_placeholder" placeholder="e.g., My Photos Sorting">
+                
+                <label data-i18n="sort.source_folder">Source Folder:</label>
+                <div class="path-browser">
+                    <input type="text" id="sort-source" data-i18n-placeholder="sort.source_placeholder" placeholder="Select folder to sort" readonly>
+                    <button onclick="openFolderBrowser('sort', 'sort-source')" class="browse-btn" data-i18n="sync.browse">📁 Browse</button>
+                </div>
+                
+                <label data-i18n="sort.sort_by">Sort By:</label>
+                <select id="sort-type">
+                    <option value="date" data-i18n="sort.date">📅 Date (Year/Month)</option>
+                    <option value="location" data-i18n="sort.location">📍 Location (Country/City)</option>
+                </select>
+                
+                <div class="sort-info">
+                    <h4 data-i18n="sort.how_title">How it works:</h4>
+                    <ul>
+                        <li data-i18n="sort.date_desc"><strong>Date Sorting:</strong> Files are organized into folders by Year/Month based on creation or modification date</li>
+                        <li data-i18n="sort.location_desc"><strong>Location Sorting:</strong> Files are organized by Country/City using GPS metadata from images</li>
+                        <li data-i18n="sort.no_metadata">Files without metadata are placed in a "Unknown" folder</li>
+                    </ul>
+                </div>
+                
+                <button onclick="createSortJob()" class="create-job-btn" data-i18n="sort.start_btn">📊 Start Sorting</button>
+            </div>
+            
+            <div class="sort-jobs-section">
+                <h3 data-i18n="sort.jobs">📋 Sort Jobs</h3>
+                <div id="sort-jobs-list" class="sort-jobs-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings View -->
+    <div id="settings-view" class="settings-view" style="display: none;">
+        <div class="settings-header">
+            <h2 data-i18n="settings.title">⚙️ Settings</h2>
+            <button onclick="hideSettings()" class="settings-back-btn" data-i18n="settings.back">← Back</button>
+        </div>
+
+        <!-- Profile Section -->
+        <div class="settings-section">
+            <h3 data-i18n="settings.profile">Profile</h3>
+            <div class="settings-row">
+                <label data-i18n="settings.username">Username</label>
+                <strong id="settings-username">—</strong>
+            </div>
+            <div class="settings-row">
+                <label data-i18n="settings.role">Role</label>
+                <span id="settings-role">—</span>
+            </div>
+        </div>
+
+        <!-- Appearance Section -->
+        <div class="settings-section">
+            <h3 data-i18n="settings.appearance">Appearance</h3>
+            <div class="settings-row">
+                <label data-i18n="settings.theme">Theme</label>
+                <div class="theme-toggle-group">
+                    <button class="theme-toggle-btn" id="theme-light-btn" onclick="setTheme('light')" data-i18n="settings.light">☀️ Light Mode</button>
+                    <button class="theme-toggle-btn" id="theme-dark-btn" onclick="setTheme('dark')" data-i18n="settings.dark">🌙 Dark Mode</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <label data-i18n="settings.accent_color">Accent Color</label>
+                <div class="accent-picker" id="accent-picker">
+                    <div class="accent-swatch" style="background: #667eea;" onclick="setAccentColor('blue', this)"></div>
+                    <div class="accent-swatch" style="background: #764ba2;" onclick="setAccentColor('purple', this)"></div>
+                    <div class="accent-swatch" style="background: #4caf50;" onclick="setAccentColor('green', this)"></div>
+                    <div class="accent-swatch" style="background: #ff9800;" onclick="setAccentColor('orange', this)"></div>
+                    <div class="accent-swatch" style="background: #e74c3c;" onclick="setAccentColor('red', this)"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Language Section -->
+        <div class="settings-section">
+            <h3 data-i18n="settings.language">Language</h3>
+            <div class="settings-row">
+                <label data-i18n="settings.language">Language</label>
+                <select id="settings-language-select" onchange="changeLanguage(this.value)">
+                    <option value="en">English</option>
+                    <option value="fr">Français</option>
+                    <option value="de">Deutsch</option>
+                    <option value="ru">Русский</option>
+                    <option value="zh">中文</option>
+                    <option value="hy">Հայերեն</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Change Password Section -->
+        <div class="settings-section">
+            <h3 data-i18n="settings.change_password">Change Password</h3>
+            <div class="password-form">
+                <input type="password" id="current-password" data-i18n-placeholder="settings.current_password" placeholder="Current Password">
+                <input type="password" id="new-password" data-i18n-placeholder="settings.new_password" placeholder="New Password">
+                <input type="password" id="confirm-password" data-i18n-placeholder="settings.confirm_password" placeholder="Confirm Password">
+                <button onclick="changePassword()" class="settings-btn" data-i18n="settings.update_password">Update Password</button>
+            </div>
+        </div>
+
+        <!-- Admin Section (conditionally shown) -->
+        <div id="admin-section" style="display: none;">
+            <!-- User Management -->
+            <div class="settings-section">
+                <h3 data-i18n="settings.user_management">User Management</h3>
+                <div class="create-user-form">
+                    <input type="text" id="new-username" data-i18n-placeholder="settings.username" placeholder="Username">
+                    <input type="password" id="new-user-password" data-i18n-placeholder="login.password" placeholder="Password">
+                    <label><input type="checkbox" id="new-user-admin"> Admin</label>
+                    <button onclick="createUser()" class="settings-btn" data-i18n="settings.create_user">Create User</button>
+                </div>
+                <table class="user-management-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="settings.username">Username</th>
+                            <th data-i18n="settings.role">Role</th>
+                            <th data-i18n="common.delete">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-table-body"></tbody>
+                </table>
+            </div>
+
+            <!-- Server Settings -->
+            <div class="settings-section">
+                <h3 data-i18n="settings.server_settings">Server Settings</h3>
+                <div class="settings-row">
+                    <label data-i18n="settings.bind_address">Bind Address</label>
+                    <input type="text" id="bind-address" placeholder=":8080">
+                </div>
+                <div class="bind-address-hint" data-i18n="settings.bind_hint">e.g., :8080, 0.0.0.0:8080, 192.168.1.5:9090. Change takes effect after server restart.</div>
+                <button onclick="saveServerSettings()" class="settings-btn" data-i18n="settings.save_server">Save Server Settings</button>
+            </div>
+
+            <!-- Authentication Methods -->
+            <div class="settings-section">
+                <h3 data-i18n="settings.auth_methods">Authentication Methods</h3>
+                <div class="auth-method-item">
+                    <div>
+                        <div class="auth-method-name" data-i18n="settings.password_auth">Password Authentication</div>
+                    </div>
+                    <span class="auth-method-status enabled" data-i18n="settings.enabled">Enabled</span>
+                </div>
+                <div class="auth-method-item">
+                    <div>
+                        <div class="auth-method-name" data-i18n="settings.google_oauth">Google OAuth</div>
+                        <div class="auth-method-note" data-i18n="settings.oauth_not_configured">Not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables to enable.</div>
+                    </div>
+                    <span class="auth-method-status disabled">Disabled</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logout Section -->
+        <div class="settings-section">
+            <button onclick="logout()" class="settings-btn danger" data-i18n="settings.logout">Logout</button>
+        </div>
+    </div>
+
+    </div> <!-- /#app -->
+
+    <!-- Folder Browser Modal -->
+    <div id="folder-browser-modal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <span class="close" onclick="closeFolderBrowser()">&times;</span>
+            <h3 data-i18n="folder_browser.title">📁 Select Folder</h3>
+            <div class="folder-browser">
+                <div class="browser-path">
+                    <span data-i18n="folder_browser.current">Current: </span>
+                    <span id="browser-current-path">/</span>
+                </div>
+                <div id="browser-folders-list" class="browser-folders-list"></div>
+            </div>
+            <div class="browser-actions">
+                <button onclick="selectCurrentFolder()" class="action-btn" data-i18n="folder_browser.select">Select This Folder</button>
+                <button onclick="closeFolderBrowser()" class="action-btn danger" data-i18n="folder_browser.cancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div id="preview-modal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close" onclick="closePreview()">&times;</span>
+            <div id="preview-content"></div>
+            <div id="preview-comment-section" style="display: none;">
+                <textarea id="preview-comment" data-i18n-placeholder="preview.comment_placeholder" placeholder="Add a comment about this file..." rows="3"></textarea>
+                <button onclick="saveMediaComment()" class="comment-save-btn" data-i18n="preview.save_comment">💾 Save Comment</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Job Log Viewer Modal -->
+    <div id="job-log-modal" class="modal" style="display: none;">
+        <div class="modal-content modal-large">
+            <span class="close" onclick="closeJobLogModal()">&times;</span>
+            <h3 id="job-log-title" data-i18n="sync.job_logs">📋 Job Logs</h3>
+            <div id="job-log-content" class="job-log-content"></div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>

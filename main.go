@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,9 +23,21 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+type UserSettings struct {
+	Theme       string `json:"theme"`
+	AccentColor string `json:"accentColor"`
+	Language    string `json:"language"`
+}
+
 type User struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"passwordHash"`
+	Username     string      `json:"username"`
+	PasswordHash string      `json:"passwordHash"`
+	IsAdmin      bool        `json:"isAdmin"`
+	Settings     UserSettings `json:"settings"`
+}
+
+type ServerSettings struct {
+	BindAddress string `json:"bindAddress"`
 }
 
 type Session struct {
@@ -121,12 +136,13 @@ type JobHistory struct {
 }
 
 type GeoPhoto struct {
-	Path    string  `json:"path"`
-	Name    string  `json:"name"`
-	Lat     float64 `json:"lat"`
-	Lon     float64 `json:"lon"`
-	Country string  `json:"country"`
-	City    string  `json:"city"`
+	Path      string    `json:"path"`
+	Name      string    `json:"name"`
+	Lat       float64   `json:"lat"`
+	Lon       float64   `json:"lon"`
+	Country   string    `json:"country"`
+	City      string    `json:"city"`
+	Timestamp time.Time `json:"timestamp,omitempty"`
 }
 
 type GeoPhotosResponse struct {
@@ -155,12 +171,15 @@ var (
 	sortControllers = make(map[string]*JobController)
 	jobLogs         = make([]JobLog, 0)
 	jobHistories    = make([]JobHistory, 0)
+	serverSettings  = ServerSettings{BindAddress: ":8080"}
 	mu              sync.RWMutex
 	sessionMu       sync.RWMutex
 	logMu           sync.RWMutex
 	dataDir         = "./data"
 	staticDir       = "./static"
+	localesDir      = "./static/locales"
 	logsDir         = "./data/logs"
+	mediaInfoDir    = "./data/media_info"
 	workerCount     = runtime.NumCPU() * 2
 	logFile         = filepath.Join(dataDir, "job_logs.json")
 	historyFile     = filepath.Join(dataDir, "job_history.json")
@@ -169,16 +188,25 @@ var (
 func main() {
 	os.MkdirAll(dataDir, 0755)
 	os.MkdirAll(staticDir, 0755)
+	os.MkdirAll(localesDir, 0755)
 	os.MkdirAll(logsDir, 0755)
+	os.MkdirAll(mediaInfoDir, 0755)
 
 	loadUsers()
+	migrateUsers()
+	loadServerSettings()
 	loadSyncJobs()
 	loadJobLogs()
 	loadJobHistory()
 
 	if len(users) == 0 {
 		hash, _ := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
-		users["admin"] = User{Username: "admin", PasswordHash: string(hash)}
+		users["admin"] = User{
+			Username:     "admin",
+			PasswordHash: string(hash),
+			IsAdmin:      true,
+			Settings:     defaultUserSettings(),
+		}
 		saveUsers()
 	}
 
@@ -207,16 +235,25 @@ func main() {
 	http.HandleFunc("/api/clear-logs", handleClearLogs)
 	http.HandleFunc("/api/clear-history", handleClearHistory)
 	http.HandleFunc("/api/geo-photos", handleGeoPhotos)
+	http.HandleFunc("/api/media-comment", handleMediaComment)
 	http.HandleFunc("/api/sort-jobs", handleSortJobs)
 	http.HandleFunc("/api/sort/start", handleSortStart)
 	http.HandleFunc("/api/sort/control", handleSortControl)
+	http.HandleFunc("/api/timeline/import", handleTimelineImport)
+	http.HandleFunc("/api/settings", handleSettings)
+	http.HandleFunc("/api/change-password", handleChangePassword)
+	http.HandleFunc("/api/users", handleUsers)
+	http.HandleFunc("/api/users/admin", handleUserAdmin)
+	http.HandleFunc("/api/server-settings", handleServerSettingsAPI)
+	http.HandleFunc("/static/locales/", serveLocale)
 	http.HandleFunc("/static/", serveStatic)
 
-	log.Println("Server starting on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Printf("Server starting on http://localhost%s", serverSettings.BindAddress)
+	log.Fatal(http.ListenAndServe(serverSettings.BindAddress, nil))
 }
 
 func serveStatic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	if strings.HasSuffix(r.URL.Path, ".css") {
 		w.Header().Set("Content-Type", "text/css")
 	}
@@ -344,6 +381,327 @@ func saveUsers() {
 	json.NewEncoder(file).Encode(users)
 }
 
+func defaultUserSettings() UserSettings {
+	return UserSettings{Theme: "light", AccentColor: "blue", Language: "en"}
+}
+
+func migrateUsers() {
+	mu.Lock()
+	defer mu.Unlock()
+	for name, u := range users {
+		if u.Settings.Theme == "" && u.Settings.AccentColor == "" && u.Settings.Language == "" {
+			u.Settings = defaultUserSettings()
+		}
+		if name == "admin" {
+			u.IsAdmin = true
+		}
+		users[name] = u
+	}
+	saveUsers()
+}
+
+func loadServerSettings() {
+	file, err := os.Open(filepath.Join(dataDir, "server_settings.json"))
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	json.NewDecoder(file).Decode(&serverSettings)
+	if serverSettings.BindAddress == "" {
+		serverSettings.BindAddress = ":8080"
+	}
+}
+
+func saveServerSettings() {
+	file, err := os.Create(filepath.Join(dataDir, "server_settings.json"))
+	if err != nil {
+		log.Printf("Error saving server settings: %v", err)
+		return
+	}
+	defer file.Close()
+	json.NewEncoder(file).Encode(serverSettings)
+}
+
+func isAdminFromSession(r *http.Request) bool {
+	username := getUserFromSession(r)
+	if username == "" {
+		return false
+	}
+	mu.RLock()
+	user, exists := users[username]
+	mu.RUnlock()
+	return exists && user.IsAdmin
+}
+
+func serveLocale(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Content-Type", "application/json")
+	http.StripPrefix("/static/locales/", http.FileServer(http.Dir(localesDir))).ServeHTTP(w, r)
+}
+
+// ============ SETTINGS & USER MANAGEMENT HANDLERS ============
+
+func handleSettings(w http.ResponseWriter, r *http.Request) {
+	username := getUserFromSession(r)
+	if username == "" {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+
+	mu.RLock()
+	user, exists := users[username]
+	mu.RUnlock()
+	if !exists {
+		http.Error(w, "User not found", 404)
+		return
+	}
+
+	if r.Method == "GET" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"username":    user.Username,
+			"isAdmin":     user.IsAdmin,
+			"settings":    user.Settings,
+		})
+		return
+	}
+
+	if r.Method == "PUT" {
+		var req struct {
+			Theme       string `json:"theme"`
+			AccentColor string `json:"accentColor"`
+			Language    string `json:"language"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", 400)
+			return
+		}
+		mu.Lock()
+		u := users[username]
+		if req.Theme != "" {
+			u.Settings.Theme = req.Theme
+		}
+		if req.AccentColor != "" {
+			u.Settings.AccentColor = req.AccentColor
+		}
+		if req.Language != "" {
+			u.Settings.Language = req.Language
+		}
+		users[username] = u
+		saveUsers()
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		return
+	}
+
+	http.Error(w, "Method not allowed", 405)
+}
+
+func handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+
+	username := getUserFromSession(r)
+	if username == "" {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+
+	var req struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	user, exists := users[username]
+	if !exists {
+		http.Error(w, "User not found", 404)
+		return
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)) != nil {
+		http.Error(w, "Current password is incorrect", 401)
+		return
+	}
+
+	if len(req.NewPassword) < 6 {
+		http.Error(w, "Password must be at least 6 characters", 400)
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Failed to hash password", 500)
+		return
+	}
+	user.PasswordHash = string(hash)
+	users[username] = user
+	saveUsers()
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func handleUsers(w http.ResponseWriter, r *http.Request) {
+	if !isAdminFromSession(r) {
+		http.Error(w, "Forbidden", 403)
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		var userList []map[string]interface{}
+		mu.RLock()
+		for _, u := range users {
+			userList = append(userList, map[string]interface{}{
+				"username": u.Username,
+				"isAdmin":  u.IsAdmin,
+			})
+		}
+		mu.RUnlock()
+		json.NewEncoder(w).Encode(userList)
+
+	case "POST":
+		var req struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			IsAdmin  bool   `json:"isAdmin"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", 400)
+			return
+		}
+		if req.Username == "" || len(req.Password) < 6 {
+			http.Error(w, "Username required and password must be at least 6 characters", 400)
+			return
+		}
+		mu.Lock()
+		if _, exists := users[req.Username]; exists {
+			mu.Unlock()
+			http.Error(w, "User already exists", 409)
+			return
+		}
+		hash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		users[req.Username] = User{
+			Username:     req.Username,
+			PasswordHash: string(hash),
+			IsAdmin:      req.IsAdmin,
+			Settings:     defaultUserSettings(),
+		}
+		saveUsers()
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+	case "DELETE":
+		var req struct {
+			Username string `json:"username"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", 400)
+			return
+		}
+		currentUser := getUserFromSession(r)
+		if req.Username == currentUser {
+			http.Error(w, "Cannot delete your own account", 400)
+			return
+		}
+		mu.Lock()
+		if _, exists := users[req.Username]; !exists {
+			mu.Unlock()
+			http.Error(w, "User not found", 404)
+			return
+		}
+		delete(users, req.Username)
+		saveUsers()
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+	default:
+		http.Error(w, "Method not allowed", 405)
+	}
+}
+
+func handleUserAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "PUT" {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+	if !isAdminFromSession(r) {
+		http.Error(w, "Forbidden", 403)
+		return
+	}
+
+	var req struct {
+		Username string `json:"username"`
+		IsAdmin  bool   `json:"isAdmin"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+
+	currentUser := getUserFromSession(r)
+	if req.Username == currentUser && !req.IsAdmin {
+		http.Error(w, "Cannot remove your own admin rights", 400)
+		return
+	}
+
+	mu.Lock()
+	user, exists := users[req.Username]
+	if !exists {
+		mu.Unlock()
+		http.Error(w, "User not found", 404)
+		return
+	}
+	user.IsAdmin = req.IsAdmin
+	users[req.Username] = user
+	saveUsers()
+	mu.Unlock()
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func handleServerSettingsAPI(w http.ResponseWriter, r *http.Request) {
+	if !isAdminFromSession(r) {
+		http.Error(w, "Forbidden", 403)
+		return
+	}
+
+	if r.Method == "GET" {
+		json.NewEncoder(w).Encode(serverSettings)
+		return
+	}
+
+	if r.Method == "PUT" {
+		var req struct {
+			BindAddress string `json:"bindAddress"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request", 400)
+			return
+		}
+		if req.BindAddress == "" {
+			req.BindAddress = ":8080"
+		}
+		mu.Lock()
+		serverSettings.BindAddress = req.BindAddress
+		saveServerSettings()
+		mu.Unlock()
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"message": "Server restart required for bind address change to take effect",
+		})
+		return
+	}
+
+	http.Error(w, "Method not allowed", 405)
+}
+
 func getUserFromSession(r *http.Request) string {
 	cookie, err := r.Cookie("session_id")
 	if err != nil {
@@ -363,6 +721,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	http.ServeFile(w, r, filepath.Join(staticDir, "index.html"))
 }
 
@@ -396,7 +755,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:   sessionID,
 		Expires: time.Now().Add(24 * time.Hour),
 	})
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"username": creds.Username,
+		"isAdmin":  user.IsAdmin,
+		"settings": user.Settings,
+	})
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -415,11 +779,24 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCheckAuth(w http.ResponseWriter, r *http.Request) {
-	if getUserFromSession(r) == "" {
+	username := getUserFromSession(r)
+	if username == "" {
 		http.Error(w, "Unauthorized", 401)
 		return
 	}
-	w.WriteHeader(200)
+	mu.RLock()
+	user, exists := users[username]
+	mu.RUnlock()
+	if !exists {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ok",
+		"username": user.Username,
+		"isAdmin":  user.IsAdmin,
+		"settings": user.Settings,
+	})
 }
 
 // ============ FILE BROWSING FUNCTIONS ============
@@ -1391,13 +1768,16 @@ func scanPhotosWithGPS(rootPath string) ([]GeoPhoto, error) {
 			return nil
 		}
 
+		ts := getPhotoTimestamp(path)
+
 		photos = append(photos, GeoPhoto{
-			Path:    path,
-			Name:    info.Name(),
-			Lat:     lat,
-			Lon:     lon,
-			Country: "",
-			City:    "",
+			Path:      path,
+			Name:      info.Name(),
+			Lat:       lat,
+			Lon:       lon,
+			Country:   "",
+			City:      "",
+			Timestamp: ts,
 		})
 		return nil
 	})
@@ -1429,6 +1809,622 @@ func getGPSData(filePath string) (float64, float64, error) {
 	}
 
 	return lat, long, nil
+}
+
+func getPhotoTimestamp(filePath string) time.Time {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+
+	exif.RegisterParsers(mknote.All...)
+
+	x, err := exif.Decode(f)
+	if err != nil {
+		return time.Time{}
+	}
+
+	ts, err := x.DateTime()
+	if err != nil {
+		return time.Time{}
+	}
+
+	return ts
+}
+
+// ============ TIMELINE IMPORT FUNCTIONS ============
+
+type TimelinePoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Lat       float64   `json:"lat"`
+	Lon       float64   `json:"lon"`
+}
+
+type TimelineImportResponse struct {
+	Points []TimelinePoint `json:"points"`
+	Format string           `json:"format"`
+}
+
+func handleTimelineImport(w http.ResponseWriter, r *http.Request) {
+	if getUserFromSession(r) == "" {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+
+	// Limit upload to 100MB
+	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		http.Error(w, "File too large or invalid: "+err.Error(), 400)
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No file uploaded: "+err.Error(), 400)
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Failed to read file: "+err.Error(), 400)
+		return
+	}
+
+	content := string(data)
+	var points []TimelinePoint
+	var format string
+
+	trimmed := strings.TrimSpace(content)
+	if trimmed != "" && trimmed[0] == '<' {
+		points, err = parseKMLTimeline(data)
+		format = "kml"
+	} else {
+		points, err = parseJSONTimeline(data)
+		format = "json"
+	}
+
+	if err != nil {
+		http.Error(w, "Failed to parse timeline file: "+err.Error(), 400)
+		return
+	}
+
+	response := TimelineImportResponse{
+		Points: points,
+		Format: format,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// ---- KML parsing ----
+
+type kmlContainer struct {
+	XMLName  xml.Name   `xml:"kml"`
+	Document *kmlDoc    `xml:"Document"`
+	Folder   *kmlFolder `xml:"Folder"`
+	Placemark *kmlPlacemark `xml:"Placemark"`
+}
+
+type kmlDoc struct {
+	Placemarks []kmlPlacemark `xml:"Placemark"`
+	Folders    []kmlFolder    `xml:"Folder"`
+}
+
+type kmlFolder struct {
+	Placemarks []kmlPlacemark `xml:"Placemark"`
+	Folders    []kmlFolder    `xml:"Folder"`
+}
+
+type kmlPlacemark struct {
+	Track *kmlTrack `xml:"Track"`
+}
+
+type kmlTrack struct {
+	When  []string `xml:"when"`
+	Coord []string `xml:"coord"`
+}
+
+func parseKMLTimeline(data []byte) ([]TimelinePoint, error) {
+	var k kmlContainer
+	if err := xml.Unmarshal(data, &k); err != nil {
+		return nil, err
+	}
+
+	var points []TimelinePoint
+
+	var visitFolder func(f *kmlFolder)
+	var visitDoc func(d *kmlDoc)
+	var visitPlacemark func(p *kmlPlacemark)
+
+	visitPlacemark = func(p *kmlPlacemark) {
+		if p == nil {
+			return
+		}
+		track := p.Track
+		if track == nil {
+			return
+		}
+		n := len(track.When)
+		if len(track.Coord) < n {
+			n = len(track.Coord)
+		}
+		for i := 0; i < n; i++ {
+			ts, err := time.Parse(time.RFC3339, strings.TrimSpace(track.When[i]))
+			if err != nil {
+				continue
+			}
+			lat, lon, ok := parseKMLCoord(track.Coord[i])
+			if !ok {
+				continue
+			}
+			points = append(points, TimelinePoint{
+				Timestamp: ts,
+				Lat:       lat,
+				Lon:       lon,
+			})
+		}
+	}
+
+	visitFolder = func(f *kmlFolder) {
+		if f == nil {
+			return
+		}
+		for _, pm := range f.Placemarks {
+			visitPlacemark(&pm)
+		}
+		for i := range f.Folders {
+			visitFolder(&f.Folders[i])
+		}
+	}
+
+	visitDoc = func(d *kmlDoc) {
+		if d == nil {
+			return
+		}
+		for _, pm := range d.Placemarks {
+			visitPlacemark(&pm)
+		}
+		for i := range d.Folders {
+			visitFolder(&d.Folders[i])
+		}
+	}
+
+	if k.Document != nil {
+		visitDoc(k.Document)
+	}
+	if k.Folder != nil {
+		visitFolder(k.Folder)
+	}
+	if k.Placemark != nil {
+		visitPlacemark(k.Placemark)
+	}
+
+	if len(points) == 0 {
+		return nil, fmt.Errorf("no track points found in KML")
+	}
+
+	return points, nil
+}
+
+func parseKMLCoord(s string) (float64, float64, bool) {
+	parts := strings.Fields(strings.TrimSpace(s))
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	lon, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	lat, err := strconv.ParseFloat(parts[1], 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return lat, lon, true
+}
+
+// ---- JSON (Records.json) parsing ----
+
+type recordsJSON struct {
+	TimelineObjects []recordsTimelineObject `json:"timelineObjects"`
+}
+
+type recordsTimelineObject struct {
+	ActivitySegment *recordsActivitySegment `json:"activitySegment,omitempty"`
+	PlaceVisit     *recordsPlaceVisit      `json:"placeVisit,omitempty"`
+}
+
+type recordsActivitySegment struct {
+	StartLocation     *recordsLocation      `json:"startLocation,omitempty"`
+	EndLocation       *recordsLocation      `json:"endLocation,omitempty"`
+	Duration          *recordsDuration       `json:"duration,omitempty"`
+	WaypointPath      *recordsWaypointPath   `json:"waypointPath,omitempty"`
+	SimplifiedRawPath *recordsRawPath        `json:"simplifiedRawPath,omitempty"`
+}
+
+type recordsLocation struct {
+	LatE7 int64 `json:"latE7"`
+	LngE7 int64 `json:"lngE7"`
+}
+
+type recordsDuration struct {
+	StartTimestamp string `json:"startTimestamp"`
+	EndTimestamp   string `json:"endTimestamp"`
+}
+
+type recordsWaypointPath struct {
+	Waypoints []recordsWaypointPoint `json:"waypoints,omitempty"`
+}
+
+type recordsWaypointPoint struct {
+	LatE7 int64 `json:"latE7"`
+	LngE7 int64 `json:"lngE7"`
+}
+
+type recordsRawPath struct {
+	Points []recordsRawPoint `json:"points,omitempty"`
+}
+
+type recordsRawPoint struct {
+	LatE7    int64  `json:"latE7"`
+	LngE7    int64  `json:"lngE7"`
+	Time     string `json:"time,omitempty"`
+}
+
+type recordsPlaceVisit struct {
+	Location  *recordsLocation `json:"location,omitempty"`
+	Duration  *recordsDuration `json:"duration,omitempty"`
+}
+
+func parseJSONTimeline(data []byte) ([]TimelinePoint, error) {
+	// Try the newer semanticSegments format (Timeline.json) first
+	points, err := parseSemanticSegments(data)
+	if err == nil && len(points) > 0 {
+		return points, nil
+	}
+
+	// Fall back to the older timelineObjects format (Records.json)
+	points, err = parseRecordsJSON(data)
+	if err == nil && len(points) > 0 {
+		return points, nil
+	}
+
+	return nil, fmt.Errorf("no track points found in JSON")
+}
+
+// ---- Newer Timeline.json format (semanticSegments) ----
+
+type semanticSegmentsJSON struct {
+	SemanticSegments []semanticSegment `json:"semanticSegments"`
+}
+
+type semanticSegment struct {
+	StartTime    string              `json:"startTime,omitempty"`
+	EndTime      string              `json:"endTime,omitempty"`
+	TimelinePath []semanticPathPoint `json:"timelinePath,omitempty"`
+	Visit        *semanticVisit      `json:"visit,omitempty"`
+	Activity     *semanticActivity   `json:"activity,omitempty"`
+}
+
+type semanticPathPoint struct {
+	Point string `json:"point"`
+	Time  string `json:"time"`
+}
+
+type semanticVisit struct {
+	TopCandidate *semanticCandidate `json:"topCandidate,omitempty"`
+}
+
+type semanticActivity struct {
+	Start *semanticLatLng `json:"start,omitempty"`
+	End   *semanticLatLng `json:"end,omitempty"`
+}
+
+type semanticCandidate struct {
+	PlaceLocation *semanticLatLng `json:"placeLocation,omitempty"`
+}
+
+type semanticLatLng struct {
+	LatLng string `json:"latLng"`
+}
+
+func parseSemanticSegments(data []byte) ([]TimelinePoint, error) {
+	var sj semanticSegmentsJSON
+	if err := json.Unmarshal(data, &sj); err != nil {
+		return nil, err
+	}
+
+	if len(sj.SemanticSegments) == 0 {
+		return nil, fmt.Errorf("no semanticSegments found")
+	}
+
+	var points []TimelinePoint
+
+	for _, seg := range sj.SemanticSegments {
+		// Extract timelinePath points (the most detailed track data)
+		for _, pp := range seg.TimelinePath {
+			lat, lon, ok := parseDMSPoint(pp.Point)
+			if !ok {
+				continue
+			}
+			ts, ok := parseRecordsTimestamp(pp.Time)
+			if !ok {
+				ts, ok = parseRecordsTimestamp(seg.StartTime)
+			}
+			if !ok {
+				continue
+			}
+			points = append(points, TimelinePoint{
+				Timestamp: ts,
+				Lat:       lat,
+				Lon:       lon,
+			})
+		}
+
+		// Extract visit location
+		if seg.Visit != nil && seg.Visit.TopCandidate != nil && seg.Visit.TopCandidate.PlaceLocation != nil {
+			lat, lon, ok := parseDMSPoint(seg.Visit.TopCandidate.PlaceLocation.LatLng)
+			if ok {
+				ts, ok := parseRecordsTimestamp(seg.StartTime)
+				if ok {
+					points = append(points, TimelinePoint{
+						Timestamp: ts,
+						Lat:       lat,
+						Lon:       lon,
+					})
+				}
+			}
+		}
+
+		// Extract activity start/end
+		if seg.Activity != nil {
+			if seg.Activity.Start != nil {
+				lat, lon, ok := parseDMSPoint(seg.Activity.Start.LatLng)
+				if ok {
+					ts, ok := parseRecordsTimestamp(seg.StartTime)
+					if ok {
+						points = append(points, TimelinePoint{
+							Timestamp: ts,
+							Lat:       lat,
+							Lon:       lon,
+						})
+					}
+				}
+			}
+			if seg.Activity.End != nil {
+				lat, lon, ok := parseDMSPoint(seg.Activity.End.LatLng)
+				if ok {
+					ts, ok := parseRecordsTimestamp(seg.EndTime)
+					if ok {
+						points = append(points, TimelinePoint{
+							Timestamp: ts,
+							Lat:       lat,
+							Lon:       lon,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	if len(points) == 0 {
+		return nil, fmt.Errorf("no track points found in semanticSegments")
+	}
+
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].Timestamp.Before(points[j].Timestamp)
+	})
+
+	return points, nil
+}
+
+// parseDMSPoint parses a coordinate string like "52.5231557°, 13.4289256°"
+func parseDMSPoint(s string) (float64, float64, bool) {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "°", "")
+	parts := strings.Split(s, ",")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	lat, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	lon, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return lat, lon, true
+}
+
+// ---- Older Records.json format (timelineObjects) ----
+
+func parseRecordsJSON(data []byte) ([]TimelinePoint, error) {
+	var recs recordsJSON
+	if err := json.Unmarshal(data, &recs); err != nil {
+		return nil, err
+	}
+
+	var points []TimelinePoint
+
+	for _, obj := range recs.TimelineObjects {
+		if obj.ActivitySegment != nil {
+			seg := obj.ActivitySegment
+			var startTS time.Time
+			var endTS time.Time
+			hasStart := false
+			hasEnd := false
+			if seg.Duration != nil {
+				startTS, hasStart = parseRecordsTimestamp(seg.Duration.StartTimestamp)
+				endTS, hasEnd = parseRecordsTimestamp(seg.Duration.EndTimestamp)
+			}
+
+			if seg.StartLocation != nil && hasStart {
+				points = append(points, TimelinePoint{
+					Timestamp: startTS,
+					Lat:       float64(seg.StartLocation.LatE7) / 1e7,
+					Lon:       float64(seg.StartLocation.LngE7) / 1e7,
+				})
+			}
+			if seg.EndLocation != nil && hasEnd {
+				points = append(points, TimelinePoint{
+					Timestamp: endTS,
+					Lat:       float64(seg.EndLocation.LatE7) / 1e7,
+					Lon:       float64(seg.EndLocation.LngE7) / 1e7,
+				})
+			}
+			// Also extract intermediate waypoints if available
+			if seg.WaypointPath != nil && hasStart {
+				for _, wp := range seg.WaypointPath.Waypoints {
+					points = append(points, TimelinePoint{
+						Timestamp: startTS,
+						Lat:       float64(wp.LatE7) / 1e7,
+						Lon:       float64(wp.LngE7) / 1e7,
+					})
+				}
+			}
+			if seg.SimplifiedRawPath != nil {
+				for _, rp := range seg.SimplifiedRawPath.Points {
+					var ts time.Time
+					if rp.Time != "" {
+						ts, _ = parseRecordsTimestamp(rp.Time)
+					} else if hasStart {
+						ts = startTS
+					}
+					if !ts.IsZero() {
+						points = append(points, TimelinePoint{
+							Timestamp: ts,
+							Lat:       float64(rp.LatE7) / 1e7,
+							Lon:       float64(rp.LngE7) / 1e7,
+						})
+					}
+				}
+			}
+		}
+		if obj.PlaceVisit != nil && obj.PlaceVisit.Location != nil && obj.PlaceVisit.Duration != nil {
+			ts, ok := parseRecordsTimestamp(obj.PlaceVisit.Duration.StartTimestamp)
+			if ok {
+				points = append(points, TimelinePoint{
+					Timestamp: ts,
+					Lat:       float64(obj.PlaceVisit.Location.LatE7) / 1e7,
+					Lon:       float64(obj.PlaceVisit.Location.LngE7) / 1e7,
+				})
+			}
+		}
+	}
+
+	if len(points) == 0 {
+		return nil, fmt.Errorf("no track points found in JSON")
+	}
+
+	// Sort by timestamp
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].Timestamp.Before(points[j].Timestamp)
+	})
+
+	return points, nil
+}
+
+func parseRecordsTimestamp(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
+	// Google uses RFC3339 with nanoseconds, e.g. "2024-01-15T10:30:00.000Z"
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.000Z",
+		"2006-01-02T15:04:05Z",
+	}
+	for _, layout := range layouts {
+		if ts, err := time.Parse(layout, s); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// ============ MEDIA COMMENT FUNCTIONS ============
+
+type MediaComment struct {
+	Path    string `json:"path"`
+	Comment string `json:"comment"`
+}
+
+func handleMediaComment(w http.ResponseWriter, r *http.Request) {
+	if getUserFromSession(r) == "" {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+
+	path := r.URL.Query().Get("path")
+
+	if r.Method == "GET" {
+		if path == "" {
+			http.Error(w, "Path required", 400)
+			return
+		}
+		commentFile := filepath.Join(mediaInfoDir, sanitizeCommentFilename(path)+".json")
+		data, err := os.ReadFile(commentFile)
+		if err != nil {
+			http.Error(w, `{"comment":""}`, 404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
+		return
+	}
+
+	if r.Method == "PUT" {
+		var comment MediaComment
+		if err := json.NewDecoder(r.Body).Decode(&comment); err != nil {
+			http.Error(w, "Invalid request body", 400)
+			return
+		}
+		commentFile := filepath.Join(mediaInfoDir, sanitizeCommentFilename(comment.Path)+".json")
+		if comment.Comment == "" {
+			// Delete the comment file if comment is empty
+			os.Remove(commentFile)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		data, _ := json.Marshal(comment)
+		if err := os.WriteFile(commentFile, data, 0644); err != nil {
+			http.Error(w, "Failed to save comment", 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+		return
+	}
+
+	http.Error(w, "Method not allowed", 405)
+}
+
+func sanitizeCommentFilename(path string) string {
+	// Replace problematic characters with underscores to make a safe filename
+	result := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		if r == '/' || r == '\\' {
+			return '-'
+		}
+		return '_'
+	}, path)
+	if len(result) > 200 {
+		result = result[:200]
+	}
+	return result
 }
 
 // ============ SORT FUNCTIONS ============
